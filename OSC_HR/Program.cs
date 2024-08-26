@@ -28,6 +28,7 @@ namespace OSC_HR
         private const float rriMax = 60f / hrMin;
 
         private static VRChatOSC vrcOsc = new VRChatOSC(true);
+        private static DateTime lastSent = DateTime.Now;
 
         private static int last_hr = 0;
 
@@ -109,15 +110,23 @@ namespace OSC_HR
                 {
                     heartRate = reader.ReadByte();
                 }
-                Console.WriteLine("Heart Rate: " + heartRate);
                 if (last_hr != heartRate)
                 {
-                    string symbol = "";
-                    if (last_hr < heartRate) symbol = "🔺";
-                    else if (last_hr > heartRate) symbol = "🔻";
+                    if ((DateTime.Now - lastSent).TotalSeconds > 1.5)
+                    {
+                        string symbol = "";
+                        if (last_hr < heartRate) symbol = "🔺";
+                        else if (last_hr > heartRate) symbol = "🔻";
 
-                    vrcOsc.SendChatbox("🤍 " + heartRate, true, false);
-                    last_hr = heartRate;
+                        vrcOsc.SendChatbox("🤍 " + heartRate, true, false);
+                        last_hr = heartRate;
+                        lastSent = DateTime.Now;
+                        Console.WriteLine("Sent Heart Rate: " + heartRate);
+                    }
+                    else
+                    {
+                        Console.WriteLine("Read Heart Rate: " + heartRate);
+                    }
                 }
             }
             catch { }

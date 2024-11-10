@@ -11,26 +11,24 @@ using Windows.Devices.Enumeration;
 using Windows.Storage.Streams;
 using VRChatOSCLib;
 using System.Text;
+using System.Diagnostics;
 
 namespace OSC_HR
 {
     internal class Program
     {
-        private const float timescale = 1000;
-        private const bool testing = false;
-        private const bool record = true;
-        private const float staleDataTime = 20;
-        private const float stalenessCatchupFactor = 0.1f;
-
         private const int hrMin = 40;
-        private const int hrMax = 180;
+        private const int hrMax = 200;
         private const float rriMin = 60f / hrMax;
         private const float rriMax = 60f / hrMin;
 
-        private static VRChatOSC vrcOsc = new VRChatOSC(true);
+        private static VRChatOSC vrcOsc = new VRChatOSC();
         private static DateTime lastSent = DateTime.Now;
 
         private static int last_hr = 0;
+
+        private static Queue<float> rriQueue = new Queue<float>();
+        private static bool isRunning = false;
 
         static async Task Main(string[] args)
         {
@@ -38,8 +36,17 @@ namespace OSC_HR
 
             while (!await Connect())
             {
-                await Task.Delay(100);
+                await Task.Delay(1000);
             }
+
+            while (Process.GetProcessesByName("vrchat").Length == 0)
+            {
+                await Task.Delay(1000);
+            }
+
+            Console.WriteLine("VRChat running");
+            vrcOsc.Connect();
+
 
             while (true)
             {
@@ -63,12 +70,13 @@ namespace OSC_HR
 
                     if (bleDevice != null && bleDevice.Appearance.Category == BluetoothLEAppearanceCategories.HeartRate)
                     {
+                        Console.WriteLine("Found Paired Heart Rate Device");
                         GattDeviceService service = bleDevice.GetGattService(new Guid("0000180d-0000-1000-8000-00805f9b34fb"));
                         characteristic = service.GetCharacteristics(new Guid("00002a37-0000-1000-8000-00805f9b34fb")).First();
 
                         if (service != null && characteristic != null)
                         {
-                            Console.WriteLine("Found Paired Heart Rate Device");
+                            Console.WriteLine("Has Heart Rate Characteristic");
 
                             GattCommunicationStatus status = await characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify);
                             if (status == GattCommunicationStatus.Success)
@@ -79,12 +87,20 @@ namespace OSC_HR
                                 Console.WriteLine("Subscribed to Heart Rate");
                                 break;
                             }
+                            else
+                            {
+                                Console.WriteLine("Failed to Subscribe");
+                            }
                         }
                     }
                 }
                 catch (Exception e)
                 {
-                    //Console.WriteLine(e.Message);
+                    Console.WriteLine(e.Message);
+                    if (bleDevice != null)
+                    {
+                        bleDevice.Dispose();
+                    }
                 }
             }
             return count > 0;
@@ -121,15 +137,101 @@ namespace OSC_HR
                         vrcOsc.SendChatbox("🤍 " + heartRate, true, false);
                         last_hr = heartRate;
                         lastSent = DateTime.Now;
-                        Console.WriteLine("Sent Heart Rate: " + heartRate);
+                        //Console.WriteLine("Sent Heart Rate: " + heartRate);
                     }
                     else
                     {
-                        Console.WriteLine("Read Heart Rate: " + heartRate);
+                        //Console.WriteLine("Read Heart Rate: " + heartRate);
+                    }
+                }
+
+                if ((flags & (1 << 4)) != 0)//RRI present (16bit)
+                {
+                    while (reader.UnconsumedBufferLength > 1)
+                    {
+                        byte a = reader.ReadByte();
+                        byte b = reader.ReadByte();
+                        int rri = b << 8 | a;
+
+                        EnqueueRRI(rri / 1024f);
                     }
                 }
             }
             catch { }
+        }
+
+
+        private static void EnqueueRRI(float rri)
+        {
+            if (rri < rriMin || rri > rriMax) //rri invalid
+            {
+                if (last_hr > hrMin && last_hr < hrMax) //use hr if valid
+                {
+                    rri = 60f / last_hr;
+                }
+                else //nothing valid assume 60bpm
+                {
+                    rri = 1f;
+                }
+            }
+
+            lock (rriQueue)
+            {
+                rriQueue.Enqueue(rri);
+            }
+
+            if (!isRunning)
+            {
+                StartProcessing();
+            }
+        }
+
+        private static async void StartProcessing()
+        {
+            isRunning = true;
+            while (true)
+            {
+                float rri = 0;
+
+                lock (rriQueue)
+                {
+                    while (true)
+                    {
+                        float sum = rriQueue.Sum(x => x);
+                        int count = rriQueue.Count;
+
+                        Console.WriteLine(count + " " + sum);
+
+                        //2 slow heart beats of 2 seconds of fast hearbeats
+                        if (sum > 2 * rriMax || count > 2 * hrMax / 60f)
+                        {
+                            rriQueue.Dequeue();
+                            Console.WriteLine("Skip");
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+
+                    if (rriQueue.Count > 0)
+                    {
+                        rri = rriQueue.Dequeue();
+                    }
+                    else
+                    {
+                        isRunning = false;
+                        Console.WriteLine("Stall");
+                        return;
+                    }
+                }
+
+
+                //do the work
+                _ = vrcOsc.SendParameterAsync("Beat", true);
+
+                await Task.Delay((int)(rri * 1000f));
+            }
         }
 
         private static void ConnectionStatusChanged(BluetoothLEDevice sender, object args)

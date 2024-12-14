@@ -56,36 +56,43 @@ namespace OSC_HR
 
 
         private static BluetoothLEDevice bleDevice;
+        private static GattDeviceService service;
         private static GattCharacteristic characteristic;
 
         private static async Task<bool> Connect()
         {
-            int count = 0;
+            Console.WriteLine("Trying to Connect");
 
-            foreach (var device in await DeviceInformation.FindAllAsync())
+            //Find BLE devices with Heart Rate Service
+            string heartRateServiceSelector = GattDeviceService.GetDeviceSelectorFromUuid(new Guid("0000180d-0000-1000-8000-00805f9b34fb"));
+            var devices = await DeviceInformation.FindAllAsync(heartRateServiceSelector);
+
+            foreach (var device in devices)
             {
                 try
                 {
+                    Console.WriteLine("Found " + device.Name);
                     bleDevice = await BluetoothLEDevice.FromIdAsync(device.Id);
 
-                    if (bleDevice != null && bleDevice.Appearance.Category == BluetoothLEAppearanceCategories.HeartRate)
+                    if (bleDevice != null)
                     {
-                        Console.WriteLine("Found Paired Heart Rate Device");
+                        Console.WriteLine("Attempting BLE Connection");
+
                         GattDeviceService service = bleDevice.GetGattService(new Guid("0000180d-0000-1000-8000-00805f9b34fb"));
-                        characteristic = service.GetCharacteristics(new Guid("00002a37-0000-1000-8000-00805f9b34fb")).First();
+                        characteristic = service?.GetCharacteristics(new Guid("00002a37-0000-1000-8000-00805f9b34fb"))?.FirstOrDefault();
 
-                        if (service != null && characteristic != null)
+                        if (characteristic != null)
                         {
-                            Console.WriteLine("Has Heart Rate Characteristic");
+                            var status = await characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(
+                                GattClientCharacteristicConfigurationDescriptorValue.Notify);
 
-                            GattCommunicationStatus status = await characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify);
                             if (status == GattCommunicationStatus.Success)
                             {
                                 bleDevice.ConnectionStatusChanged += ConnectionStatusChanged;
                                 characteristic.ValueChanged += ValueChanged;
-                                count++;
+
                                 Console.WriteLine("Subscribed to Heart Rate");
-                                break;
+                                return true;
                             }
                             else
                             {
@@ -96,14 +103,16 @@ namespace OSC_HR
                 }
                 catch (Exception e)
                 {
-                    Console.WriteLine(e.Message);
-                    if (bleDevice != null)
-                    {
-                        bleDevice.Dispose();
-                    }
+                    Console.WriteLine("Error: " + e.Message);
                 }
+
+                service?.Dispose();
+                bleDevice?.Dispose();
             }
-            return count > 0;
+
+            Console.WriteLine();
+
+            return false;
         }
 
         private static void ValueChanged(GattCharacteristic sender, GattValueChangedEventArgs args)
@@ -241,14 +250,18 @@ namespace OSC_HR
 
         private static void CurrentDomain_ProcessExit(object sender, EventArgs e)
         {
+            if (characteristic != null)
+            {
+                characteristic.ValueChanged -= ValueChanged;
+            }
             if (bleDevice != null)
             {
                 bleDevice.ConnectionStatusChanged -= ConnectionStatusChanged;
-                characteristic.ValueChanged -= ValueChanged;
-                bleDevice.Dispose();
             }
 
-            vrcOsc.Dispose();
+            service?.Dispose();
+            bleDevice?.Dispose();
+            vrcOsc?.Dispose();
         }
     }
 }
